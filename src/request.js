@@ -1,69 +1,73 @@
 'use strict';
-import https from 'https';
-import querystring from 'querystring';
 
-// cache of the cookie - avoid re-requesting on subsequent requests.
+import { URLSearchParams } from 'node:url';
+
 let cookieVal;
 
-// simpler request method for avoiding double-promise confusion
-function rereq(options, done) {
-  let req;
-
-  req = https.request(options, (res) => {
-    let chunk = '';
-
-    res.on('data', (data) => {
-      chunk += data;
-    });
-    res.on('end', () => {
-      done(null, chunk.toString('utf8'));
-    });
-  });
-  req.on('error', (e) => {
-    done(e);
-  });
-  req.end();
+function buildQueryString(params) {
+  return new URLSearchParams(params).toString();
 }
 
-export default function request({method, host, path, qs, agent}) {
+async function rereq(options) {
+  const { host, method, path, agent, headers } = options;
+
+  const url = `https://${host}${path}`;
+
+  const response = await fetch(url, {
+    method,
+    headers: headers || {},
+    agent,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}`);
+  }
+
+  return await response.text();
+}
+
+export default async function request({ method, host, path, qs, agent }) {
+  const queryString = buildQueryString(qs);
+  let fullPath = `${path}?${queryString}`;
+
+  let headers = {};
+
+  // Use cached cookieVal if set on 429 error
+  if (cookieVal) {
+    headers['cookie'] = cookieVal;
+  }
+
   const options = {
     host,
     method,
-    path: `${path}?${querystring.stringify(qs)}`,
+    path: fullPath,
+    agent,
+    headers,
   };
 
-  if (agent) options.agent = agent;
-  // will use cached cookieVal if set on 429 error
-  if (cookieVal) options.headers = {'cookie': cookieVal};
+  try {
+    const url = `https://${host}${fullPath}`;
 
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let chunk = '';
-
-      res.on('data', (data) => {
-        chunk += data;
-      });
-
-      res.on('end', () => {
-        if (res.statusCode === 429 && res.headers['set-cookie']) {
-          // Fix for the "too many requests" issue
-          // Look for the set-cookie header and re-request
-          cookieVal = res.headers['set-cookie'][0].split(';')[0];
-          options.headers = {'cookie': cookieVal};
-          rereq(options, function(err, response) {
-            if (err) return reject(err);
-            resolve(response);
-          });
-        } else {
-          resolve(chunk.toString('utf8'));
-        }
-      });
+    const response = await fetch(url, {
+      method,
+      headers,
+      agent,
     });
 
-    req.on('error', (e) => {
-      reject(e);
-    });
+    if (response.status === 429 && response.headers.get('set-cookie')) {
+      // Fix for the "too many requests" issue
+      // Look for the set-cookie header and re-request
+      cookieVal = response.headers.get('set-cookie').split(';')[0];
+      headers['cookie'] = cookieVal;
+      return await rereq(options);
+    }
 
-    req.end();
-  });
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    return await response.text();
+  } catch (error) {
+    throw error;
+  }
 }
